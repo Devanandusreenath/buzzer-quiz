@@ -329,6 +329,25 @@
             z-index: 1000;
         }
 
+        .connection-status {
+            position: fixed;
+            top: 70px;
+            right: 20px;
+            padding: 10px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: bold;
+            z-index: 1000;
+        }
+
+        .connection-status.connected {
+            background: linear-gradient(45deg, #56ab2f, #a8e6cf);
+        }
+
+        .connection-status.disconnected {
+            background: linear-gradient(45deg, #FF416C, #FF4B2B);
+        }
+
         @media (max-width: 768px) {
             .container {
                 padding: 10px;
@@ -396,6 +415,8 @@
         </select>
     </div>
 
+    <div class="connection-status" id="connectionStatus">🔄 Connecting...</div>
+
     <div class="container">
         <!-- Login Screen -->
         <div id="loginScreen" class="screen active">
@@ -412,6 +433,12 @@
                 </div>
                 <button class="btn btn-primary" onclick="login()">Login</button>
                 <div id="loginMessage" style="margin-top: 20px; text-align: center;"></div>
+                
+                <div style="margin-top: 30px; padding: 20px; background: rgba(255,255,255,0.1); border-radius: 10px;">
+                    <h3>Demo Credentials:</h3>
+                    <p><strong>Admin:</strong> admin / admin123</p>
+                    <p><strong>Players:</strong> player1 / pass1, player2 / pass2, player3 / pass3</p>
+                </div>
             </div>
         </div>
 
@@ -431,6 +458,10 @@
                     <div class="stat-card">
                         <div class="stat-number" id="activeSessions">1</div>
                         <div>Active Sessions</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number" id="onlinePlayers">0</div>
+                        <div>Online Players</div>
                     </div>
                 </div>
                 <div style="text-align: center; margin-bottom: 20px;">
@@ -616,7 +647,7 @@
     <div class="confetti" id="confetti"></div>
 
     <script>
-        // Game State with persistence
+        // Shared Game State
         let gameState = {
             currentUser: null,
             isAdmin: false,
@@ -629,35 +660,243 @@
             buzzedPlayer: null,
             leaderboard: {},
             soundEnabled: true,
-            theme: 'default'
+            theme: 'default',
+            onlinePlayers: new Set(),
+            lastSync: 0
         };
 
-        // Persistent data storage simulation (in a real deployment, this would be a database)
+        // Simple storage system
+        const DATA_SERVER = {
+            saveData(data) {
+                try {
+                    const existingData = JSON.parse(localStorage.getItem('buzzerGameData') || '{}');
+                    const mergedData = { ...existingData, ...data };
+                    localStorage.setItem('buzzerGameData', JSON.stringify(mergedData));
+                    return true;
+                } catch (error) {
+                    console.error('Failed to save data:', error);
+                    return false;
+                }
+            },
+
+            loadData() {
+                try {
+                    const savedData = localStorage.getItem('buzzerGameData');
+                    return savedData ? JSON.parse(savedData) : null;
+                } catch (error) {
+                    console.error('Failed to load data:', error);
+                    return null;
+                }
+            },
+
+            syncGameState() {
+                try {
+                    const sharedData = localStorage.getItem('sharedGameState');
+                    return sharedData ? JSON.parse(sharedData) : null;
+                } catch (error) {
+                    return null;
+                }
+            },
+
+            updateSharedState(state) {
+                try {
+                    localStorage.setItem('sharedGameState', JSON.stringify(state));
+                } catch (error) {
+                    console.error('Failed to update shared state:', error);
+                }
+            }
+        };
+
+        // Initialize persistent data
         let persistentData = {
             users: {
                 admin: { password: 'admin123', role: 'admin' }
             },
             quizzes: [],
-            gameHistory: []
+            gameHistory: [],
+            currentGameState: null
         };
 
-        // Load data from server simulation
+        let users = {};
+
+        // Connection status management
+        function updateConnectionStatus(connected) {
+            const statusElement = document.getElementById('connectionStatus');
+            if (connected) {
+                statusElement.textContent = '🟢 Connected';
+                statusElement.className = 'connection-status connected';
+            } else {
+                statusElement.textContent = '🔴 Offline Mode';
+                statusElement.className = 'connection-status disconnected';
+            }
+        }
+
+        // Load data from storage
         function loadPersistentData() {
-            // In a real application, this would be an API call to your server
-            const savedData = localStorage.getItem('buzzerGameData');
-            if (savedData) {
+            try {
+                updateConnectionStatus(false);
+                
+                const savedData = DATA_SERVER.loadData();
+                if (savedData) {
+                    persistentData = { ...persistentData, ...savedData };
+                }
+                
+                users = { ...persistentData.users };
+                
+                Object.keys(users).forEach(user => {
+                    if (users[user].role === 'player') {
+                        gameState.leaderboard[user] = 0;
+                    }
+                });
+
+                updateConnectionStatus(true);
+                console.log('Data loaded successfully');
+            } catch (error) {
+                console.error('Failed to load data:', error);
+                updateConnectionStatus(false);
+                initializeDemoData();
+            }
+            
+            startRealTimeSync();
+        }
+
+        // Save data to storage
+        function savePersistentData() {
+            try {
+                persistentData.users = { ...users };
+                if (gameState.quiz) {
+                    persistentData.quizzes = [gameState.quiz];
+                }
+                persistentData.currentGameState = {
+                    gameActive: gameState.gameActive,
+                    currentQuestionIndex: gameState.currentQuestionIndex,
+                    leaderboard: gameState.leaderboard,
+                    timeLeft: gameState.timeLeft,
+                    buzzedPlayer: gameState.buzzedPlayer,
+                    quiz: gameState.quiz
+                };
+                
+                DATA_SERVER.saveData(persistentData);
+                DATA_SERVER.updateSharedState(persistentData.currentGameState);
+                
+                console.log('Data saved successfully');
+                updateConnectionStatus(true);
+                return true;
+            } catch (error) {
+                console.error('Failed to save data:', error);
+                updateConnectionStatus(false);
+                return false;
+            }
+        }
+
+        // Real-time synchronization
+        function startRealTimeSync() {
+            setInterval(() => {
+                if (!gameState.currentUser) return;
+                
                 try {
-                    const parsed = JSON.parse(savedData);
-                    persistentData = { ...persistentData, ...parsed };
-                } catch (e) {
-                    console.log('No previous data found, using defaults');
+                    const serverState = DATA_SERVER.syncGameState();
+                    if (serverState && JSON.stringify(serverState) !== JSON.stringify(gameState.lastSync)) {
+                        syncWithServerState(serverState);
+                        gameState.lastSync = { ...serverState };
+                    }
+                    updateConnectionStatus(true);
+                } catch (error) {
+                    updateConnectionStatus(false);
+                    console.log('Sync failed, working in offline mode');
+                }
+            }, 2000);
+        }
+
+        // Sync local state with server state
+        function syncWithServerState(serverState) {
+            if (!serverState) return;
+            
+            if (serverState.gameActive !== gameState.gameActive) {
+                gameState.gameActive = serverState.gameActive;
+                
+                if (gameState.gameActive && !gameState.isAdmin) {
+                    document.getElementById('playerWaiting').style.display = 'none';
+                    document.getElementById('playerGame').style.display = 'block';
                 }
             }
             
-            // Initialize users from persistent data
-            users = { ...persistentData.users };
+            if (serverState.currentQuestionIndex !== gameState.currentQuestionIndex) {
+                gameState.currentQuestionIndex = serverState.currentQuestionIndex;
+                if (!gameState.isAdmin) {
+                    displayCurrentQuestion();
+                }
+            }
             
-            // Initialize leaderboard for existing players
+            if (serverState.leaderboard) {
+                gameState.leaderboard = { ...serverState.leaderboard };
+                updateLeaderboard();
+            }
+            
+            if (serverState.quiz && !gameState.quiz) {
+                gameState.quiz = serverState.quiz;
+            }
+            
+            if (serverState.timeLeft !== undefined) {
+                gameState.timeLeft = serverState.timeLeft;
+                updateTimerDisplay();
+            }
+            
+            if (serverState.buzzedPlayer !== gameState.buzzedPlayer) {
+                gameState.buzzedPlayer = serverState.buzzedPlayer;
+                if (!gameState.isAdmin && gameState.buzzedPlayer) {
+                    updateBuzzState();
+                }
+            }
+        }
+
+        // Initialize demo data
+        function initializeDemoData() {
+            users.player1 = { password: 'pass1', role: 'player' };
+            users.player2 = { password: 'pass2', role: 'player' };
+            users.player3 = { password: 'pass3', role: 'player' };
+            
+            gameState.quiz = {
+                title: "Demo Quiz",
+                settings: {
+                    correctPoints: 10,
+                    wrongPoints: 5,
+                    timePerQuestion: 30
+                },
+                questions: [
+                    {
+                        id: 1,
+                        text: "What is the capital of France?",
+                        type: "mcq",
+                        options: {
+                            A: "London",
+                            B: "Berlin",
+                            C: "Paris",
+                            D: "Madrid"
+                        },
+                        correctAnswer: "C"
+                    },
+                    {
+                        id: 2,
+                        text: "What is 2 + 2?",
+                        type: "open",
+                        correctAnswer: "4"
+                    },
+                    {
+                        id: 3,
+                        text: "Which planet is known as the Red Planet?",
+                        type: "mcq",
+                        options: {
+                            A: "Venus",
+                            B: "Mars",
+                            C: "Jupiter",
+                            D: "Saturn"
+                        },
+                        correctAnswer: "B"
+                    }
+                ]
+            };
+            
             Object.keys(users).forEach(user => {
                 if (users[user].role === 'player') {
                     gameState.leaderboard[user] = 0;
@@ -665,67 +904,52 @@
             });
         }
 
-        // Save data to server simulation
-        function savePersistentData() {
-            // In a real application, this would be an API call to your server
-            persistentData.users = { ...users };
-            if (gameState.quiz) {
-                persistentData.quizzes = [gameState.quiz];
-            }
-            
-            try {
-                localStorage.setItem('buzzerGameData', JSON.stringify(persistentData));
-                console.log('Data saved successfully');
-            } catch (e) {
-                console.error('Failed to save data:', e);
-            }
-        }
-
-        // Initialize users from persistent data
-        let users = {};
-
         // Sound Effects
         function playSound(type) {
             if (!gameState.soundEnabled) return;
             
-            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            let frequency, duration;
-            
-            switch(type) {
-                case 'buzz':
-                    frequency = 400;
-                    duration = 0.3;
-                    break;
-                case 'correct':
-                    frequency = 800;
-                    duration = 0.5;
-                    break;
-                case 'wrong':
-                    frequency = 200;
-                    duration = 0.8;
-                    break;
-                case 'timer':
-                    frequency = 1000;
-                    duration = 0.1;
-                    break;
-                default:
-                    return;
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                let frequency, duration;
+                
+                switch(type) {
+                    case 'buzz':
+                        frequency = 400;
+                        duration = 0.3;
+                        break;
+                    case 'correct':
+                        frequency = 800;
+                        duration = 0.5;
+                        break;
+                    case 'wrong':
+                        frequency = 200;
+                        duration = 0.8;
+                        break;
+                    case 'timer':
+                        frequency = 1000;
+                        duration = 0.1;
+                        break;
+                    default:
+                        return;
+                }
+                
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+                
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                
+                oscillator.frequency.value = frequency;
+                oscillator.type = 'sine';
+                
+                gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + duration);
+                
+                oscillator.start(audioContext.currentTime);
+                oscillator.stop(audioContext.currentTime + duration);
+            } catch (error) {
+                console.log('Audio not supported');
             }
-            
-            const oscillator = audioContext.createOscillator();
-            const gainNode = audioContext.createGain();
-            
-            oscillator.connect(gainNode);
-            gainNode.connect(audioContext.destination);
-            
-            oscillator.frequency.value = frequency;
-            oscillator.type = 'sine';
-            
-            gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-            gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + duration);
-            
-            oscillator.start(audioContext.currentTime);
-            oscillator.stop(audioContext.currentTime + duration);
         }
 
         function toggleSound() {
@@ -763,8 +987,6 @@
             document.getElementById(screenId).classList.add('active');
         }
 
-
-
         function login() {
             const username = document.getElementById('username').value.trim();
             const password = document.getElementById('password').value;
@@ -774,26 +996,33 @@
                 return;
             }
             
-            // Check if user exists and password matches
             if (users[username] && users[username].password === password) {
                 gameState.currentUser = username;
                 gameState.isAdmin = users[username].role === 'admin';
+                gameState.onlinePlayers.add(username);
                 
                 if (gameState.isAdmin) {
                     showScreen('adminDashboard');
                     loadPlayerList();
+                    updateDashboardStats();
                     showMessage('loginMessage', 'Welcome Admin! 👑', 'success');
                 } else {
                     showScreen('playerScreen');
                     initializePlayer();
                     showMessage('loginMessage', `Welcome ${username}! 🎮`, 'success');
                 }
+                
+                savePersistentData();
             } else {
                 showMessage('loginMessage', 'Invalid username or password', 'error');
             }
         }
 
         function logout() {
+            if (gameState.currentUser) {
+                gameState.onlinePlayers.delete(gameState.currentUser);
+            }
+            
             gameState.currentUser = null;
             gameState.isAdmin = false;
             gameState.gameActive = false;
@@ -802,6 +1031,8 @@
             document.getElementById('username').value = '';
             document.getElementById('password').value = '';
             showScreen('loginScreen');
+            
+            savePersistentData();
         }
 
         function showMessage(elementId, message, type) {
@@ -822,9 +1053,11 @@
         function updateDashboardStats() {
             const playerCount = Object.keys(users).filter(user => users[user].role === 'player').length;
             const questionCount = gameState.quiz ? gameState.quiz.questions.length : 0;
+            const onlineCount = Array.from(gameState.onlinePlayers).filter(user => users[user] && users[user].role === 'player').length;
             
             document.getElementById('totalPlayers').textContent = playerCount;
             document.getElementById('totalQuestions').textContent = questionCount;
+            document.getElementById('onlinePlayers').textContent = onlineCount;
         }
 
         function syncData() {
@@ -832,8 +1065,7 @@
             syncStatus.textContent = '🔄 Syncing data...';
             syncStatus.style.color = '#ffa500';
             
-            // Simulate data sync (in real app, this would be an API call)
-            setTimeout(() => {
+            try {
                 loadPersistentData();
                 updateDashboardStats();
                 loadPlayerList();
@@ -844,7 +1076,14 @@
                 setTimeout(() => {
                     syncStatus.textContent = '';
                 }, 3000);
-            }, 1000);
+            } catch (error) {
+                syncStatus.textContent = '❌ Sync failed - Working offline';
+                syncStatus.style.color = '#ff6b6b';
+                
+                setTimeout(() => {
+                    syncStatus.textContent = '';
+                }, 3000);
+            }
         }
 
         function showCreateQuiz() {
@@ -915,7 +1154,6 @@
                 };
                 question.correctAnswer = correctAnswer;
                 
-                // Clear MCQ fields
                 document.getElementById('optionA').value = '';
                 document.getElementById('optionB').value = '';
                 document.getElementById('optionC').value = '';
@@ -930,6 +1168,7 @@
             displayQuestions();
             
             showAchievement('Question Added! 📝');
+            savePersistentData();
         }
 
         function displayQuestions() {
@@ -955,6 +1194,7 @@
             if (!gameState.quiz) return;
             gameState.quiz.questions = gameState.quiz.questions.filter(q => q.id !== questionId);
             displayQuestions();
+            savePersistentData();
         }
 
         function saveQuiz() {
@@ -980,7 +1220,6 @@
                 timePerQuestion
             };
             
-            // Save to persistent storage
             savePersistentData();
             
             showAchievement('Quiz Saved Successfully! 🎉');
@@ -1004,13 +1243,12 @@
             users[username] = { password, role: 'player' };
             gameState.leaderboard[username] = 0;
             
-            // Save to persistent storage
-            savePersistentData();
-            
             document.getElementById('playerUsername').value = '';
             document.getElementById('playerPassword').value = '';
             
+            savePersistentData();
             loadPlayerList();
+            updateDashboardStats();
             showAchievement('Player Added Successfully! 👤');
         }
 
@@ -1028,6 +1266,7 @@
                     <div>
                         <strong>${player}</strong>
                         <br><small>Score: ${gameState.leaderboard[player] || 0}</small>
+                        ${gameState.onlinePlayers.has(player) ? '<br><small style="color: #4ecdc4;">🟢 Online</small>' : '<br><small style="color: #ff6b6b;">🔴 Offline</small>'}
                     </div>
                     <button class="btn btn-danger" onclick="removePlayer('${player}')">Remove</button>
                 </div>
@@ -1038,12 +1277,12 @@
             if (confirm(`Are you sure you want to remove player ${username}?`)) {
                 delete users[username];
                 delete gameState.leaderboard[username];
+                gameState.onlinePlayers.delete(username);
                 
-                // Save to persistent storage
                 savePersistentData();
-                
                 loadPlayerList();
                 updateLeaderboard();
+                updateDashboardStats();
             }
         }
 
@@ -1057,6 +1296,7 @@
             } else {
                 document.getElementById('playerWaiting').style.display = 'block';
                 document.getElementById('playerGame').style.display = 'none';
+                document.getElementById('gameResults').style.display = 'none';
             }
         }
 
@@ -1070,7 +1310,6 @@
             gameState.currentQuestionIndex = 0;
             gameState.buzzedPlayer = null;
             
-            // Reset all player scores
             Object.keys(gameState.leaderboard).forEach(player => {
                 gameState.leaderboard[player] = 0;
             });
@@ -1082,6 +1321,8 @@
             displayCurrentQuestion();
             startTimer();
             updateGameMonitor();
+            
+            savePersistentData();
             
             playSound('correct');
             showAchievement('Quiz Started! 🚀');
@@ -1099,6 +1340,8 @@
             showFinalResults();
             createConfetti();
             playSound('correct');
+            
+            savePersistentData();
         }
 
         function nextQuestion() {
@@ -1110,6 +1353,8 @@
                 displayCurrentQuestion();
                 startTimer();
                 updateGameMonitor();
+                
+                savePersistentData();
             } else {
                 endQuiz();
             }
@@ -1121,10 +1366,11 @@
             const question = gameState.quiz.questions[gameState.currentQuestionIndex];
             const questionDisplay = `Q${gameState.currentQuestionIndex + 1}: ${question.text}`;
             
-            // Update admin monitor
-            document.getElementById('currentQuestionDisplay').textContent = questionDisplay;
+            const currentQuestionDisplay = document.getElementById('currentQuestionDisplay');
+            if (currentQuestionDisplay) {
+                currentQuestionDisplay.textContent = questionDisplay;
+            }
             
-            // Update all player screens
             const playerQuestion = document.getElementById('playerQuestion');
             const playerOptions = document.getElementById('playerOptions');
             const openAnswerInput = document.getElementById('openAnswerInput');
@@ -1142,16 +1388,17 @@
                 } else {
                     playerOptions.style.display = 'none';
                     openAnswerInput.style.display = 'block';
-                    document.getElementById('playerAnswer').value = '';
+                    const playerAnswerInput = document.getElementById('playerAnswer');
+                    if (playerAnswerInput) playerAnswerInput.value = '';
                 }
                 
-                // Reset buzz button
-                buzzButton.disabled = false;
-                buzzButton.classList.remove('disabled');
-                buzzButton.textContent = '🔔 BUZZ!';
+                if (buzzButton) {
+                    buzzButton.disabled = false;
+                    buzzButton.classList.remove('disabled');
+                    buzzButton.textContent = '🔔 BUZZ!';
+                }
             }
             
-            // Clear previous feedback
             const playerFeedback = document.getElementById('playerFeedback');
             if (playerFeedback) playerFeedback.innerHTML = '';
         }
@@ -1173,6 +1420,10 @@
                 if (gameState.timeLeft <= 0) {
                     clearInterval(gameState.timer);
                     handleTimeUp();
+                }
+                
+                if (gameState.isAdmin && gameState.timeLeft % 5 === 0) {
+                    savePersistentData();
                 }
             }, 1000);
         }
@@ -1206,27 +1457,39 @@
             
             gameState.buzzedPlayer = gameState.currentUser;
             
-            // Disable buzz button
             const buzzButton = document.getElementById('buzzButton');
             buzzButton.disabled = true;
             buzzButton.classList.add('disabled');
             buzzButton.textContent = 'BUZZED!';
             
-            // Stop timer
             if (gameState.timer) clearInterval(gameState.timer);
             
-            // Show answer controls to admin
-            document.getElementById('answerControls').style.display = 'block';
+            const answerControls = document.getElementById('answerControls');
+            if (answerControls && gameState.isAdmin) {
+                answerControls.style.display = 'block';
+            }
             
             updateBuzzActivity(`🔔 ${gameState.currentUser} buzzed first!`);
             playSound('buzz');
             
-            // Show options or input field
             const question = gameState.quiz.questions[gameState.currentQuestionIndex];
             if (question.type === 'mcq') {
-                document.getElementById('playerOptions').style.display = 'block';
+                const playerOptions = document.getElementById('playerOptions');
+                if (playerOptions) playerOptions.style.display = 'block';
             } else {
-                document.getElementById('openAnswerInput').style.display = 'block';
+                const openAnswerInput = document.getElementById('openAnswerInput');
+                if (openAnswerInput) openAnswerInput.style.display = 'block';
+            }
+            
+            savePersistentData();
+        }
+
+        function updateBuzzState() {
+            const buzzButton = document.getElementById('buzzButton');
+            if (buzzButton && gameState.buzzedPlayer && gameState.buzzedPlayer !== gameState.currentUser) {
+                buzzButton.disabled = true;
+                buzzButton.classList.add('disabled');
+                buzzButton.textContent = `${gameState.buzzedPlayer} BUZZED!`;
             }
         }
 
@@ -1234,7 +1497,6 @@
             const question = gameState.quiz.questions[gameState.currentQuestionIndex];
             const isCorrect = option === question.correctAnswer;
             
-            // Highlight selected option
             document.querySelectorAll('.option-btn').forEach(btn => {
                 btn.disabled = true;
                 if (btn.id === `option${option}`) {
@@ -1248,11 +1510,14 @@
             updateScore(isCorrect);
             showAnswerFeedback(isCorrect, question.correctAnswer);
             
+            savePersistentData();
             setTimeout(() => nextQuestion(), 3000);
         }
 
         function submitAnswer() {
-            const playerAnswer = document.getElementById('playerAnswer').value.trim();
+            const playerAnswerInput = document.getElementById('playerAnswer');
+            const playerAnswer = playerAnswerInput ? playerAnswerInput.value.trim() : '';
+            
             if (!playerAnswer) {
                 alert('Please enter an answer');
                 return;
@@ -1261,15 +1526,15 @@
             const question = gameState.quiz.questions[gameState.currentQuestionIndex];
             const isCorrect = question.correctAnswer ? 
                 playerAnswer.toLowerCase() === question.correctAnswer.toLowerCase() : 
-                false; // Admin will judge if no correct answer is set
+                false;
             
             if (!question.correctAnswer) {
-                // Admin needs to judge
                 updateBuzzActivity(`${gameState.currentUser} answered: "${playerAnswer}" - Admin, please judge!`);
                 showAnswerFeedback(null, 'Admin is reviewing your answer...');
             } else {
                 updateScore(isCorrect);
                 showAnswerFeedback(isCorrect, question.correctAnswer);
+                savePersistentData();
                 setTimeout(() => nextQuestion(), 3000);
             }
         }
@@ -1279,10 +1544,10 @@
             
             updateScore(isCorrect);
             
-            const question = gameState.quiz.questions[gameState.currentQuestionIndex];
             updateBuzzActivity(`Admin marked ${gameState.buzzedPlayer}'s answer as ${isCorrect ? 'CORRECT' : 'WRONG'}`);
             
             document.getElementById('answerControls').style.display = 'none';
+            savePersistentData();
             setTimeout(() => nextQuestion(), 2000);
         }
 
@@ -1301,6 +1566,8 @@
             if (isCorrect) {
                 showAchievement(`+${points} points! 🎉`);
             }
+            
+            savePersistentData();
         }
 
         function showAnswerFeedback(isCorrect, correctAnswer) {
@@ -1319,7 +1586,14 @@
         function updateBuzzActivity(message) {
             const buzzActivity = document.getElementById('buzzActivity');
             if (buzzActivity) {
-                buzzActivity.innerHTML = `<div class="buzz-alert">${message}</div>` + buzzActivity.innerHTML;
+                const alertDiv = document.createElement('div');
+                alertDiv.className = 'buzz-alert';
+                alertDiv.textContent = message;
+                buzzActivity.insertBefore(alertDiv, buzzActivity.firstChild);
+                
+                while (buzzActivity.children.length > 5) {
+                    buzzActivity.removeChild(buzzActivity.lastChild);
+                }
             }
         }
 
@@ -1328,7 +1602,6 @@
                 .sort(([,a], [,b]) => b - a);
             
             updateLiveLeaderboard(leaderboardData);
-            updatePlayerLeaderboard(leaderboardData);
         }
 
         function updateLiveLeaderboard(leaderboardData) {
@@ -1342,14 +1615,10 @@
             
             liveLeaderboard.innerHTML = leaderboardData.map(([player, score], index) => `
                 <div class="leaderboard-item ${index === 0 ? 'winner' : ''}">
-                    <span>${index + 1}. ${player}</span>
+                    <span>${index + 1}. ${player} ${gameState.onlinePlayers.has(player) ? '🟢' : '🔴'}</span>
                     <span>${score} points</span>
                 </div>
             `).join('');
-        }
-
-        function updatePlayerLeaderboard(leaderboardData) {
-            // This would update the player's view of the leaderboard if shown
         }
 
         function updateGameMonitor() {
@@ -1371,9 +1640,13 @@
                 
                 finalLeaderboard.innerHTML = `
                     <div class="leaderboard">
+                        <h3>🏆 Final Rankings</h3>
                         ${leaderboardData.map(([player, score], index) => `
                             <div class="leaderboard-item ${index === 0 ? 'winner' : ''}">
-                                <span>${index === 0 ? '👑' : `${index + 1}.`} ${player}</span>
+                                <span>
+                                    ${index === 0 ? '👑' : `${index + 1}.`} ${player}
+                                    ${index === 0 ? ' - CHAMPION!' : ''}
+                                </span>
                                 <span>${score} points</span>
                             </div>
                         `).join('')}
@@ -1381,10 +1654,45 @@
                 `;
             }
             
-            if (leaderboardData.length > 0) {
-                const winner = leaderboardData[0][0];
-                showAchievement(`🏆 Winner: ${winner}! 🎉`);
+            // Update admin monitor
+            updateLiveLeaderboard(leaderboardData);
+        }
+
+        function createConfetti() {
+            const confettiContainer = document.getElementById('confetti');
+            confettiContainer.innerHTML = '';
+            
+            const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'];
+            
+            for (let i = 0; i < 50; i++) {
+                const confetti = document.createElement('div');
+                confetti.style.position = 'absolute';
+                confetti.style.width = '10px';
+                confetti.style.height = '10px';
+                confetti.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
+                confetti.style.left = Math.random() * 100 + '%';
+                confetti.style.animationDuration = (Math.random() * 3 + 2) + 's';
+                confetti.style.animationName = 'confetti-fall';
+                confetti.style.animationTimingFunction = 'linear';
+                confetti.style.animationFillMode = 'forwards';
+                
+                confettiContainer.appendChild(confetti);
             }
+            
+            // Add CSS animation for confetti
+            const style = document.createElement('style');
+            style.textContent = `
+                @keyframes confetti-fall {
+                    0% { transform: translateY(-100vh) rotate(0deg); opacity: 1; }
+                    100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+                }
+            `;
+            document.head.appendChild(style);
+            
+            setTimeout(() => {
+                confettiContainer.innerHTML = '';
+                document.head.removeChild(style);
+            }, 5000);
         }
 
         function showAchievement(message) {
@@ -1398,103 +1706,304 @@
             }, 3000);
         }
 
-        function createConfetti() {
-            const confetti = document.getElementById('confetti');
-            confetti.innerHTML = '';
-            
-            for (let i = 0; i < 100; i++) {
-                const piece = document.createElement('div');
-                piece.style.position = 'absolute';
-                piece.style.width = '10px';
-                piece.style.height = '10px';
-                piece.style.backgroundColor = `hsl(${Math.random() * 360}, 70%, 60%)`;
-                piece.style.left = Math.random() * window.innerWidth + 'px';
-                piece.style.top = '-10px';
-                piece.style.borderRadius = '50%';
-                piece.style.animation = `fall ${2 + Math.random() * 3}s ease-out forwards`;
-                
-                confetti.appendChild(piece);
-            }
-            
-            // Add CSS animation for falling confetti
-            if (!document.getElementById('confetti-style')) {
-                const style = document.createElement('style');
-                style.id = 'confetti-style';
-                style.textContent = `
-                    @keyframes fall {
-                        to {
-                            transform: translateY(100vh) rotate(360deg);
-                            opacity: 0;
-                        }
-                    }
-                `;
-                document.head.appendChild(style);
-            }
-            
-            setTimeout(() => confetti.innerHTML = '', 5000);
-        }
-
-        // Initialize the game
-        window.onload = function() {
-            // Load persistent data first
+        // Initialize the application
+        window.addEventListener('load', () => {
             loadPersistentData();
-            
-            // Pre-populate demo quiz if no quiz exists
-            if (!gameState.quiz) {
-                gameState.quiz = {
-                    title: "Demo Quiz",
-                    settings: {
-                        correctPoints: 10,
-                        wrongPoints: 5,
-                        timePerQuestion: 30
-                    },
-                    questions: [
-                        {
-                            id: 1,
-                            text: "What is the capital of France?",
-                            type: "mcq",
-                            options: {
-                                A: "London",
-                                B: "Berlin",
-                                C: "Paris",
-                                D: "Madrid"
-                            },
-                            correctAnswer: "C"
-                        },
-                        {
-                            id: 2,
-                            text: "What is 2 + 2?",
-                            type: "open",
-                            correctAnswer: "4"
-                        },
-                        {
-                            id: 3,
-                            text: "Which planet is known as the Red Planet?",
-                            type: "mcq",
-                            options: {
-                                A: "Venus",
-                                B: "Mars",
-                                C: "Jupiter",
-                                D: "Saturn"
-                            },
-                            correctAnswer: "B"
-                        }
-                    ]
-                };
+            initializeDemoData();
+            updateConnectionStatus(true);
+        });
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            // Space bar to buzz (for players)
+            if (e.code === 'Space' && !gameState.isAdmin && gameState.gameActive) {
+                e.preventDefault();
+                buzz();
             }
             
-            // Add some demo players if none exist
-            const playerCount = Object.keys(users).filter(user => users[user].role === 'player').length;
-            if (playerCount === 0) {
-                users.player1 = { password: 'pass1', role: 'player' };
-                users.player2 = { password: 'pass2', role: 'player' };
-                users.player3 = { password: 'pass3', role: 'player' };
+            // Admin shortcuts
+            if (gameState.isAdmin) {
+                switch(e.key) {
+                    case '1':
+                        if (e.ctrlKey) {
+                            e.preventDefault();
+                            markAnswer(true);
+                        }
+                        break;
+                    case '2':
+                        if (e.ctrlKey) {
+                            e.preventDefault();
+                            markAnswer(false);
+                        }
+                        break;
+                    case 'n':
+                        if (e.ctrlKey) {
+                            e.preventDefault();
+                            nextQuestion();
+                        }
+                        break;
+                }
+            }
+        });
+
+        // Prevent space bar from scrolling when used for buzzing
+        document.addEventListener('keydown', (e) => {
+            if (e.code === 'Space' && !gameState.isAdmin && gameState.gameActive) {
+                e.preventDefault();
+            }
+        });
+
+        // Auto-save functionality
+        setInterval(() => {
+            if (gameState.currentUser) {
                 savePersistentData();
             }
-            
-            console.log('Game initialized with persistent data');
-            console.log('Available players:', Object.keys(users).filter(user => users[user].role === 'player'));
+        }, 30000); // Auto-save every 30 seconds
+
+        // Visibility change handling (pause timer when tab is not visible)
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden && gameState.timer) {
+                // Tab is hidden, pause timer logic could go here
+                console.log('Tab hidden - consider pausing timer');
+            } else if (!document.hidden && gameState.gameActive) {
+                // Tab is visible again
+                console.log('Tab visible - resume normal operation');
+            }
+        });
+
+        // Handle page unload
+        window.addEventListener('beforeunload', () => {
+            if (gameState.currentUser) {
+                gameState.onlinePlayers.delete(gameState.currentUser);
+                savePersistentData();
+            }
+        });
+
+        // Mobile responsiveness helpers
+        function checkMobileDevice() {
+            return window.innerWidth <= 768;
+        }
+
+        // Adjust UI for mobile
+        window.addEventListener('resize', () => {
+            if (checkMobileDevice()) {
+                // Mobile adjustments
+                const buzzButton = document.getElementById('buzzButton');
+                if (buzzButton) {
+                    buzzButton.style.width = '120px';
+                    buzzButton.style.height = '120px';
+                    buzzButton.style.fontSize = '18px';
+                }
+            } else {
+                // Desktop adjustments
+                const buzzButton = document.getElementById('buzzButton');
+                if (buzzButton) {
+                    buzzButton.style.width = '150px';
+                    buzzButton.style.height = '150px';
+                    buzzButton.style.fontSize = '24px';
+                }
+            }
+        });
+
+        // Initialize mobile check
+        if (checkMobileDevice()) {
+            document.body.classList.add('mobile');
+        }
+
+        // Add touch support for buzz button
+        let touchStartTime = 0;
+        document.addEventListener('touchstart', (e) => {
+            if (e.target.id === 'buzzButton') {
+                touchStartTime = Date.now();
+            }
+        });
+
+        document.addEventListener('touchend', (e) => {
+            if (e.target.id === 'buzzButton') {
+                const touchDuration = Date.now() - touchStartTime;
+                if (touchDuration < 500) { // Quick tap
+                    buzz();
+                }
+            }
+        });
+
+        // Performance monitoring
+        let performanceMetrics = {
+            buzzResponseTime: [],
+            questionLoadTime: [],
+            syncTime: []
         };
+
+        function measureBuzzResponse() {
+            const startTime = performance.now();
+            return () => {
+                const endTime = performance.now();
+                performanceMetrics.buzzResponseTime.push(endTime - startTime);
+            };
+        }
+
+        // Enhanced error handling
+        window.addEventListener('error', (e) => {
+            console.error('Application error:', e.error);
+            showAchievement('⚠️ An error occurred. Please refresh if needed.');
+        });
+
+        // Enhanced sync status
+        function updateSyncStatus(status, message) {
+            const syncStatus = document.getElementById('syncStatus');
+            if (syncStatus) {
+                syncStatus.textContent = message;
+                syncStatus.style.color = status === 'success' ? '#4ecdc4' : 
+                                       status === 'error' ? '#ff6b6b' : '#ffa500';
+            }
+        }
+
+        // Game statistics tracking
+        let gameStats = {
+            totalQuizzes: 0,
+            totalQuestions: 0,
+            averageResponseTime: 0,
+            playerPerformance: {}
+        };
+
+        function updateGameStats() {
+            gameStats.totalQuizzes++;
+            gameStats.totalQuestions += gameState.quiz ? gameState.quiz.questions.length : 0;
+            
+            // Calculate average response time
+            if (performanceMetrics.buzzResponseTime.length > 0) {
+                gameStats.averageResponseTime = performanceMetrics.buzzResponseTime.reduce((a, b) => a + b, 0) / performanceMetrics.buzzResponseTime.length;
+            }
+            
+            // Update player performance
+            Object.keys(gameState.leaderboard).forEach(player => {
+                if (!gameStats.playerPerformance[player]) {
+                    gameStats.playerPerformance[player] = {
+                        totalGames: 0,
+                        totalScore: 0,
+                        averageScore: 0
+                    };
+                }
+                
+                gameStats.playerPerformance[player].totalGames++;
+                gameStats.playerPerformance[player].totalScore += gameState.leaderboard[player];
+                gameStats.playerPerformance[player].averageScore = 
+                    gameStats.playerPerformance[player].totalScore / gameStats.playerPerformance[player].totalGames;
+            });
+        }
+
+        // Export game data functionality
+        function exportGameData() {
+            const gameData = {
+                timestamp: new Date().toISOString(),
+                quiz: gameState.quiz,
+                leaderboard: gameState.leaderboard,
+                stats: gameStats,
+                settings: {
+                    soundEnabled: gameState.soundEnabled,
+                    theme: gameState.theme
+                }
+            };
+            
+            const dataStr = JSON.stringify(gameData, null, 2);
+            const dataBlob = new Blob([dataStr], {type: 'application/json'});
+            const url = URL.createObjectURL(dataBlob);
+            
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `quiz-game-export-${new Date().toISOString().split('T')[0]}.json`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+            
+            showAchievement('Game data exported! 📊');
+        }
+
+        // Import game data functionality
+        function importGameData(file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const importedData = JSON.parse(e.target.result);
+                    
+                    // Validate imported data
+                    if (importedData.quiz && importedData.leaderboard) {
+                        gameState.quiz = importedData.quiz;
+                        gameState.leaderboard = importedData.leaderboard;
+                        
+                        if (importedData.settings) {
+                            gameState.soundEnabled = importedData.settings.soundEnabled;
+                            gameState.theme = importedData.settings.theme;
+                            changeTheme(gameState.theme);
+                        }
+                        
+                        if (importedData.stats) {
+                            gameStats = { ...gameStats, ...importedData.stats };
+                        }
+                        
+                        savePersistentData();
+                        updateDashboardStats();
+                        displayQuestions();
+                        
+                        showAchievement('Game data imported successfully! 📥');
+                    } else {
+                        throw new Error('Invalid game data format');
+                    }
+                } catch (error) {
+                    console.error('Import error:', error);
+                    showAchievement('❌ Failed to import game data');
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        // Add import/export buttons to admin dashboard (this would be added to the HTML)
+        function addImportExportButtons() {
+            const adminDashboard = document.getElementById('adminDashboard');
+            if (adminDashboard && gameState.isAdmin) {
+                const buttonContainer = adminDashboard.querySelector('.card > div[style*="text-align: center"]');
+                if (buttonContainer && !buttonContainer.querySelector('#exportBtn')) {
+                    const exportBtn = document.createElement('button');
+                    exportBtn.id = 'exportBtn';
+                    exportBtn.className = 'btn';
+                    exportBtn.textContent = '📊 Export Data';
+                    exportBtn.onclick = exportGameData;
+                    
+                    const importBtn = document.createElement('button');
+                    importBtn.id = 'importBtn';
+                    importBtn.className = 'btn';
+                    importBtn.textContent = '📥 Import Data';
+                    importBtn.onclick = () => {
+                        const input = document.createElement('input');
+                        input.type = 'file';
+                        input.accept = '.json';
+                        input.onchange = (e) => {
+                            if (e.target.files[0]) {
+                                importGameData(e.target.files[0]);
+                            }
+                        };
+                        input.click();
+                    };
+                    
+                    buttonContainer.appendChild(exportBtn);
+                    buttonContainer.appendChild(importBtn);
+                }
+            }
+        }
+
+        // Call this when admin dashboard is shown
+        const originalShowAdminDashboard = showAdminDashboard;
+        showAdminDashboard = function() {
+            originalShowAdminDashboard();
+            setTimeout(addImportExportButtons, 100);
+        };
+
+        console.log('🎯 Ultimate Buzzer Quiz Game initialized successfully!');
+        console.log('📱 Mobile support enabled');
+        console.log('🎵 Sound effects ready');
+        console.log('💾 Auto-save enabled');
+        console.log('⌨️ Keyboard shortcuts: Space (buzz), Ctrl+1 (correct), Ctrl+2 (wrong), Ctrl+N (next)');
     </script>
 </body>
 </html>
