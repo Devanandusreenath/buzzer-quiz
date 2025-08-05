@@ -419,12 +419,28 @@
         <div id="adminDashboard" class="screen">
             <div class="card">
                 <h2>🛠️ Admin Dashboard</h2>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-number" id="totalPlayers">0</div>
+                        <div>Total Players</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number" id="totalQuestions">0</div>
+                        <div>Quiz Questions</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number" id="activeSessions">1</div>
+                        <div>Active Sessions</div>
+                    </div>
+                </div>
                 <div style="text-align: center; margin-bottom: 20px;">
                     <button class="btn btn-primary" onclick="showCreateQuiz()">Create Quiz</button>
                     <button class="btn btn-success" onclick="showManagePlayers()">Manage Players</button>
                     <button class="btn btn-warning" onclick="showGameMonitor()">Game Monitor</button>
+                    <button class="btn" onclick="syncData()">🔄 Sync Data</button>
                     <button class="btn btn-danger" onclick="logout()">Logout</button>
                 </div>
+                <div id="syncStatus" style="text-align: center; margin: 10px 0;"></div>
             </div>
         </div>
 
@@ -600,7 +616,7 @@
     <div class="confetti" id="confetti"></div>
 
     <script>
-        // Game State
+        // Game State with persistence
         let gameState = {
             currentUser: null,
             isAdmin: false,
@@ -616,13 +632,57 @@
             theme: 'default'
         };
 
-        // Initialize with demo admin and players
-        let users = {
-            admin: { password: 'admin123', role: 'admin' },
-            player1: { password: 'pass1', role: 'player' },
-            player2: { password: 'pass2', role: 'player' },
-            player3: { password: 'pass3', role: 'player' }
+        // Persistent data storage simulation (in a real deployment, this would be a database)
+        let persistentData = {
+            users: {
+                admin: { password: 'admin123', role: 'admin' }
+            },
+            quizzes: [],
+            gameHistory: []
         };
+
+        // Load data from server simulation
+        function loadPersistentData() {
+            // In a real application, this would be an API call to your server
+            const savedData = localStorage.getItem('buzzerGameData');
+            if (savedData) {
+                try {
+                    const parsed = JSON.parse(savedData);
+                    persistentData = { ...persistentData, ...parsed };
+                } catch (e) {
+                    console.log('No previous data found, using defaults');
+                }
+            }
+            
+            // Initialize users from persistent data
+            users = { ...persistentData.users };
+            
+            // Initialize leaderboard for existing players
+            Object.keys(users).forEach(user => {
+                if (users[user].role === 'player') {
+                    gameState.leaderboard[user] = 0;
+                }
+            });
+        }
+
+        // Save data to server simulation
+        function savePersistentData() {
+            // In a real application, this would be an API call to your server
+            persistentData.users = { ...users };
+            if (gameState.quiz) {
+                persistentData.quizzes = [gameState.quiz];
+            }
+            
+            try {
+                localStorage.setItem('buzzerGameData', JSON.stringify(persistentData));
+                console.log('Data saved successfully');
+            } catch (e) {
+                console.error('Failed to save data:', e);
+            }
+        }
+
+        // Initialize users from persistent data
+        let users = {};
 
         // Sound Effects
         function playSound(type) {
@@ -756,6 +816,35 @@
 
         function showAdminDashboard() {
             showScreen('adminDashboard');
+            updateDashboardStats();
+        }
+
+        function updateDashboardStats() {
+            const playerCount = Object.keys(users).filter(user => users[user].role === 'player').length;
+            const questionCount = gameState.quiz ? gameState.quiz.questions.length : 0;
+            
+            document.getElementById('totalPlayers').textContent = playerCount;
+            document.getElementById('totalQuestions').textContent = questionCount;
+        }
+
+        function syncData() {
+            const syncStatus = document.getElementById('syncStatus');
+            syncStatus.textContent = '🔄 Syncing data...';
+            syncStatus.style.color = '#ffa500';
+            
+            // Simulate data sync (in real app, this would be an API call)
+            setTimeout(() => {
+                loadPersistentData();
+                updateDashboardStats();
+                loadPlayerList();
+                
+                syncStatus.textContent = '✅ Data synchronized successfully!';
+                syncStatus.style.color = '#4ecdc4';
+                
+                setTimeout(() => {
+                    syncStatus.textContent = '';
+                }, 3000);
+            }, 1000);
         }
 
         function showCreateQuiz() {
@@ -891,6 +980,9 @@
                 timePerQuestion
             };
             
+            // Save to persistent storage
+            savePersistentData();
+            
             showAchievement('Quiz Saved Successfully! 🎉');
             setTimeout(() => showAdminDashboard(), 1500);
         }
@@ -911,6 +1003,9 @@
             
             users[username] = { password, role: 'player' };
             gameState.leaderboard[username] = 0;
+            
+            // Save to persistent storage
+            savePersistentData();
             
             document.getElementById('playerUsername').value = '';
             document.getElementById('playerPassword').value = '';
@@ -943,6 +1038,10 @@
             if (confirm(`Are you sure you want to remove player ${username}?`)) {
                 delete users[username];
                 delete gameState.leaderboard[username];
+                
+                // Save to persistent storage
+                savePersistentData();
+                
                 loadPlayerList();
                 updateLeaderboard();
             }
@@ -1337,42 +1436,64 @@
 
         // Initialize the game
         window.onload = function() {
-            // Pre-populate some demo data
-            gameState.quiz = {
-                title: "Demo Quiz",
-                settings: {
-                    correctPoints: 10,
-                    wrongPoints: 5,
-                    timePerQuestion: 30
-                },
-                questions: [
-                    {
-                        id: 1,
-                        text: "What is the capital of France?",
-                        type: "mcq",
-                        options: {
-                            A: "London",
-                            B: "Berlin",
-                            C: "Paris",
-                            D: "Madrid"
-                        },
-                        correctAnswer: "C"
-                    },
-                    {
-                        id: 2,
-                        text: "What is 2 + 2?",
-                        type: "open",
-                        correctAnswer: "4"
-                    }
-                ]
-            };
+            // Load persistent data first
+            loadPersistentData();
             
-            // Initialize leaderboard for existing players
-            Object.keys(users).forEach(user => {
-                if (users[user].role === 'player') {
-                    gameState.leaderboard[user] = 0;
-                }
-            });
+            // Pre-populate demo quiz if no quiz exists
+            if (!gameState.quiz) {
+                gameState.quiz = {
+                    title: "Demo Quiz",
+                    settings: {
+                        correctPoints: 10,
+                        wrongPoints: 5,
+                        timePerQuestion: 30
+                    },
+                    questions: [
+                        {
+                            id: 1,
+                            text: "What is the capital of France?",
+                            type: "mcq",
+                            options: {
+                                A: "London",
+                                B: "Berlin",
+                                C: "Paris",
+                                D: "Madrid"
+                            },
+                            correctAnswer: "C"
+                        },
+                        {
+                            id: 2,
+                            text: "What is 2 + 2?",
+                            type: "open",
+                            correctAnswer: "4"
+                        },
+                        {
+                            id: 3,
+                            text: "Which planet is known as the Red Planet?",
+                            type: "mcq",
+                            options: {
+                                A: "Venus",
+                                B: "Mars",
+                                C: "Jupiter",
+                                D: "Saturn"
+                            },
+                            correctAnswer: "B"
+                        }
+                    ]
+                };
+            }
+            
+            // Add some demo players if none exist
+            const playerCount = Object.keys(users).filter(user => users[user].role === 'player').length;
+            if (playerCount === 0) {
+                users.player1 = { password: 'pass1', role: 'player' };
+                users.player2 = { password: 'pass2', role: 'player' };
+                users.player3 = { password: 'pass3', role: 'player' };
+                savePersistentData();
+            }
+            
+            console.log('Game initialized with persistent data');
+            console.log('Available players:', Object.keys(users).filter(user => users[user].role === 'player'));
         };
     </script>
 </body>
